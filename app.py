@@ -32,7 +32,7 @@ st.set_page_config(
 )
 
 # =========================================================
-# DEFAULT MAP POSITION 
+# DEFAULT MAP POSITION
 # =========================================================
 
 if "center" not in st.session_state:
@@ -310,72 +310,48 @@ def geojson_to_kml(
     highlight_groups
 ):
 
+    # group_name -> uat -> [features]
+    highlighted_folders = defaultdict(lambda: defaultdict(list))
+
     uat_folders = defaultdict(list)
 
-    highlighted_folders = defaultdict(list)
-
-    cf_to_group = {}
+    # Build a mapping cf -> set of group names
+    # (a CF could theoretically belong to multiple groups)
+    cf_to_groups = defaultdict(set)
 
     for group_name, cfs in highlight_groups.items():
-
         for cf in cfs:
-
-            cf_to_group[
-                str(cf).strip()
-            ] = group_name
+            cf_to_groups[str(cf).strip()].add(group_name)
 
     for feature in fc["features"]:
 
-        props = feature.get(
-            "properties",
-            {}
-        )
+        props = feature.get("properties", {})
 
         cf = str(
-            props.get(
-                "NR_CARTE_FUNCIARA",
-                ""
-            )
+            props.get("NR_CARTE_FUNCIARA", "")
         ).strip()
 
-        uat = props.get(
-            "UAT",
-            "NO_UAT"
-        ) or "NO_UAT"
+        uat = props.get("UAT", "NO_UAT") or "NO_UAT"
 
-        if cf in cf_to_group:
+        groups_for_cf = cf_to_groups.get(cf)
 
-            highlighted_folders[
-                cf_to_group[cf]
-            ].append(feature)
-
+        if groups_for_cf:
+            # Add the feature to every group it belongs to,
+            # under its own UAT sub-folder
+            for group_name in groups_for_cf:
+                highlighted_folders[group_name][uat].append(feature)
         else:
-
             uat_folders[uat].append(feature)
 
-    def make_placemark(
-        feature,
-        style_id
-    ):
+    def make_placemark(feature, style_id):
 
-        props = feature.get(
-            "properties",
-            {}
-        )
+        props = feature.get("properties", {})
 
-        geom = feature.get(
-            "geometry"
-        )
+        geom = feature.get("geometry")
 
-        cf = props.get(
-            "NR_CARTE_FUNCIARA",
-            ""
-        )
+        cf = props.get("NR_CARTE_FUNCIARA", "")
 
-        identifier = props.get(
-            "IDENTIFIER",
-            ""
-        )
+        identifier = props.get("IDENTIFIER", "")
 
         name = (
             f"CF {cf}"
@@ -415,22 +391,31 @@ def geojson_to_kml(
     folder_kml = []
 
     # =====================================================
-    # HIGHLIGHTED GROUPS
+    # HIGHLIGHTED GROUPS — cu subgrupuri pe UAT
     # =====================================================
 
-    for group_name, features in sorted(
-        highlighted_folders.items()
-    ):
+    for group_name, uat_map in sorted(highlighted_folders.items()):
 
-        placemarks = [
+        uat_subfolders = []
 
-            make_placemark(
-                feature,
-                "yellowMarkedStyle"
-            )
+        for uat, features in sorted(uat_map.items()):
 
-            for feature in features
-        ]
+            placemarks = [
+                make_placemark(feature, "yellowMarkedStyle")
+                for feature in features
+            ]
+
+            uat_subfolders.append(f"""
+        <Folder>
+
+          <name>
+            {html.escape(str(uat))}
+          </name>
+
+          {''.join(placemarks)}
+
+        </Folder>
+        """)
 
         folder_kml.append(f"""
         <Folder>
@@ -439,7 +424,7 @@ def geojson_to_kml(
             {html.escape(str(group_name))}
           </name>
 
-          {''.join(placemarks)}
+          {''.join(uat_subfolders)}
 
         </Folder>
         """)
@@ -448,17 +433,10 @@ def geojson_to_kml(
     # UAT FOLDERS
     # =====================================================
 
-    for uat, features in sorted(
-        uat_folders.items()
-    ):
+    for uat, features in sorted(uat_folders.items()):
 
         placemarks = [
-
-            make_placemark(
-                feature,
-                "blueParcelStyle"
-            )
-
+            make_placemark(feature, "blueParcelStyle")
             for feature in features
         ]
 
@@ -538,13 +516,13 @@ with st.sidebar:
 
     q = st.text_input(
 
-    "Search location",
+        "Search location",
 
-    value="",
+        value="",
 
-    placeholder="Victoria, Braila"
+        placeholder="Victoria, Braila"
 
-)
+    )
 
     if st.button(
         "Go to location",
@@ -861,4 +839,3 @@ if export_clicked:
                     "No parcels found "
                     "inside polygon."
                 )
-
