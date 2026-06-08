@@ -272,13 +272,20 @@ def fetch_features_by_ids(object_ids):
 
     chunk_size = 250
 
-    max_workers = 8
-
-    progress = st.sidebar.progress(0)
-
-    status = st.sidebar.empty()
+    # Keep concurrency low: the ANCPI server is slow and tends
+    # to queue parallel requests, which makes the progress bar
+    # jump at the end instead of moving smoothly. A few workers
+    # speed things up while still giving steady progress.
+    max_workers = 4
 
     total = len(object_ids)
+
+    # Show the bar immediately so the user sees it before any
+    # request returns.
+    progress = st.sidebar.progress(
+        0,
+        text=f"Downloading 0 / {total} parcels...",
+    )
 
     chunks = [
         object_ids[i:i + chunk_size]
@@ -303,16 +310,12 @@ def fetch_features_by_ids(object_ids):
             done_ids += futures[future]
 
             progress.progress(
-                min(done_ids / total, 1.0)
-            )
-
-            status.write(
-                f"Downloaded "
-                f"{done_ids} / {total} parcels..."
+                min(done_ids / total, 1.0),
+                text=f"Downloading "
+                     f"{done_ids} / {total} parcels...",
             )
 
     progress.empty()
-    status.empty()
 
     return {
         "type": "FeatureCollection",
