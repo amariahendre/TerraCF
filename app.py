@@ -184,7 +184,45 @@ def get_object_ids(esri_geom_json):
     return data.get("objectIds", [])
 
 
+# Funcție PURĂ, cache-uită — descarcă un singur chunk,
+# fără widget-uri Streamlit înăuntru.
 @st.cache_data(show_spinner=False)
+def fetch_chunk(chunk_ids):
+
+    params = {
+
+        "f": "geojson",
+
+        "objectIds":
+            ",".join(map(str, chunk_ids)),
+
+        "outFields": "*",
+
+        "returnGeometry": "true",
+
+        "outSR": "4326",
+    }
+
+    # retry de 3 ori la erori 5xx de la serverul ANCPI
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                LAYER_QUERY_URL,
+                params=params,
+                timeout=120,
+            )
+            r.raise_for_status()
+            break
+        except requests.HTTPError:
+            if attempt == 2:
+                raise
+            time.sleep(2 ** attempt)
+
+    return r.json().get("features", [])
+
+
+# Wrapper NON-cache-uit — aici trăiește progress bar-ul,
+# ca să se afișeze corect mereu.
 def fetch_features_by_ids(object_ids):
 
     features = []
@@ -203,41 +241,9 @@ def fetch_features_by_ids(object_ids):
         chunk_size
     ):
 
-        chunk = object_ids[i:i + chunk_size]
+        chunk = tuple(object_ids[i:i + chunk_size])
 
-        params = {
-
-            "f": "geojson",
-
-            "objectIds":
-                ",".join(map(str, chunk)),
-
-            "outFields": "*",
-
-            "returnGeometry": "true",
-
-            "outSR": "4326",
-        }
-
-        for attempt in range(3):
-            try:
-                r = requests.get(
-                    LAYER_QUERY_URL,
-                    params=params,
-                    timeout=120,
-                )
-                r.raise_for_status()
-                break
-            except requests.HTTPError:
-                if attempt == 2:
-                    raise
-                time.sleep(2 ** attempt)
-
-        data = r.json()
-
-        features.extend(
-            data.get("features", [])
-        )
+        features.extend(fetch_chunk(chunk))
 
         progress.progress(
             min(len(features) / total, 1.0)
@@ -732,33 +738,44 @@ Draw(
 ).add_to(m)
 
 # DISPLAY DOWNLOADED FEATURES
+# Afișăm doar dacă sunt relativ puține parcele, altfel
+# browserul îngheață. Parcelele sunt oricum vizibile
+# prin layer-ul WMS "ANCPI Parcels".
+
+MAX_DISPLAY_FEATURES = 400
 
 if st.session_state.geojson:
 
-    folium.GeoJson(
+    n_feat = len(
+        st.session_state.geojson.get("features", [])
+    )
 
-        st.session_state.geojson,
+    if n_feat <= MAX_DISPLAY_FEATURES:
 
-        name="Downloaded Parcels",
+        folium.GeoJson(
 
-        tooltip=folium.GeoJsonTooltip(
+            st.session_state.geojson,
 
-            fields=[
-                "NR_CARTE_FUNCIARA",
-                "IDENTIFIER",
-                "UAT",
-                "LOCALITATE",
-            ],
+            name="Downloaded Parcels",
 
-            aliases=[
-                "CF",
-                "Identifier",
-                "UAT",
-                "Locality",
-            ],
-        ),
+            tooltip=folium.GeoJsonTooltip(
 
-    ).add_to(m)
+                fields=[
+                    "NR_CARTE_FUNCIARA",
+                    "IDENTIFIER",
+                    "UAT",
+                    "LOCALITATE",
+                ],
+
+                aliases=[
+                    "CF",
+                    "Identifier",
+                    "UAT",
+                    "Locality",
+                ],
+            ),
+
+        ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
