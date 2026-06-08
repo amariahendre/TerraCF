@@ -9,6 +9,7 @@ from folium.plugins import Draw
 from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # =========================================================
 # CONFIG
@@ -43,6 +44,14 @@ if "zoom" not in st.session_state:
 
 if "geojson" not in st.session_state:
     st.session_state.geojson = None
+
+if "kml" not in st.session_state:
+    st.session_state.kml = None
+
+# Max number of parcels to draw on the interactive map.
+# Above this, st_folium would freeze the browser, so we
+# skip rendering and only offer the download files.
+MAX_RENDER_FEATURES = 1500
 
 # =========================================================
 # FUNCTIONS
@@ -170,11 +179,40 @@ def get_object_ids(esri_geom):
     return data.get("objectIds", [])
 
 
+def _fetch_chunk(chunk):
+
+    params = {
+
+        "f": "geojson",
+
+        "objectIds":
+            ",".join(map(str, chunk)),
+
+        "outFields": "*",
+
+        "returnGeometry": "true",
+
+        "outSR": "4326",
+    }
+
+    r = requests.get(
+        LAYER_QUERY_URL,
+        params=params,
+        timeout=120
+    )
+
+    r.raise_for_status()
+
+    return r.json().get("features", [])
+
+
 def fetch_features_by_ids(object_ids):
 
     features = []
 
     chunk_size = 250
+
+    max_workers = 8
 
     progress = st.sidebar.progress(0)
 
@@ -182,50 +220,36 @@ def fetch_features_by_ids(object_ids):
 
     total = len(object_ids)
 
-    for i in range(
-        0,
-        total,
-        chunk_size
-    ):
+    chunks = [
+        object_ids[i:i + chunk_size]
+        for i in range(0, total, chunk_size)
+    ]
 
-        chunk = object_ids[i:i + chunk_size]
+    done_ids = 0
 
-        params = {
+    with ThreadPoolExecutor(
+        max_workers=max_workers
+    ) as executor:
 
-            "f": "geojson",
-
-            "objectIds":
-                ",".join(map(str, chunk)),
-
-            "outFields": "*",
-
-            "returnGeometry": "true",
-
-            "outSR": "4326",
+        futures = {
+            executor.submit(_fetch_chunk, chunk): len(chunk)
+            for chunk in chunks
         }
 
-        r = requests.get(
-            LAYER_QUERY_URL,
-            params=params,
-            timeout=120
-        )
+        for future in as_completed(futures):
 
-        r.raise_for_status()
+            features.extend(future.result())
 
-        data = r.json()
+            done_ids += futures[future]
 
-        features.extend(
-            data.get("features", [])
-        )
+            progress.progress(
+                min(done_ids / total, 1.0)
+            )
 
-        progress.progress(
-            min(len(features) / total, 1.0)
-        )
-
-        status.write(
-            f"Downloaded "
-            f"{len(features)} / {total} parcels..."
-        )
+            status.write(
+                f"Downloaded "
+                f"{done_ids} / {total} parcels..."
+            )
 
     progress.empty()
     status.empty()
@@ -707,8 +731,18 @@ Draw(
 ).add_to(m)
 
 # DISPLAY DOWNLOADED FEATURES
+# Only render on the interactive map if the parcel count is
+# small enough. Above MAX_RENDER_FEATURES, st_folium would
+# serialize every polygon to the browser and freeze the tab —
+# the files are still available via the download buttons.
 
-if st.session_state.geojson:
+_feature_count = (
+    len(st.session_state.geojson["features"])
+    if st.session_state.geojson
+    else 0
+)
+
+if st.session_state.geojson and _feature_count <= MAX_RENDER_FEATURES:
 
     folium.GeoJson(
 
@@ -800,42 +834,68 @@ if export_clicked:
 
                 st.session_state.geojson = fc
 
-                kml = geojson_to_kml(
+                st.session_state.kml = geojson_to_kml(
                     fc,
                     highlight_groups
                 )
 
-                st.sidebar.download_button(
-
-                    "Download KML",
-
-                    data=kml.encode("utf-8"),
-
-                    file_name=
-                        "ancpi_parcels.kml",
-
-                    mime=
-                        "application/vnd.google-earth.kml+xml",
-                )
-
-                st.sidebar.download_button(
-
-                    "Download GeoJSON",
-
-                    data=json.dumps(fc).encode(
-                        "utf-8"
-                    ),
-
-                    file_name=
-                        "ancpi_parcels.geojson",
-
-                    mime=
-                        "application/geo+json",
-                )
-
             else:
+
+                st.session_state.geojson = None
+                st.session_state.kml = None
 
                 st.sidebar.warning(
                     "No parcels found "
                     "inside polygon."
                 )
+
+# =========================================================
+# DOWNLOAD BUTTONS
+# =========================================================
+# Rendered unconditionally from session_state so they survive
+# the rerun that Streamlit triggers when a download_button is
+# clicked (otherwise the first download wipes out the others).
+
+if st.session_state.geojson and st.session_state.kml:
+
+    n_features = len(st.session_state.geojson["features"])
+
+    if n_features > MAX_RENDER_FEATURES:
+
+        st.sidebar.info(
+            f"{n_features} parcels downloaded. "
+            f"Too many to draw on the map — "
+            f"use the download buttons below."
+        )
+
+    st.sidebar.download_button(
+
+        "Download KML",
+
+        data=st.session_state.kml.encode("utf-8"),
+
+        file_name=
+            "ancpi_parcels.kml",
+
+        mime=
+            "application/vnd.google-earth.kml+xml",
+
+        use_container_width=True,
+    )
+
+    st.sidebar.download_button(
+
+        "Download GeoJSON",
+
+        data=json.dumps(
+            st.session_state.geojson
+        ).encode("utf-8"),
+
+        file_name=
+            "ancpi_parcels.geojson",
+
+        mime=
+            "application/geo+json",
+
+        use_container_width=True,
+    )
