@@ -7,7 +7,8 @@ import folium
 
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
+from geopy.geocoders import Nominatim, Photon
+from geopy.exc import GeocoderServiceError, GeocoderTimedOut
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -57,20 +58,79 @@ MAX_RENDER_FEATURES = 1500
 # FUNCTIONS
 # =========================================================
 
+def _geocode_with(geolocator, query):
+
+    # Try once, retry a couple of times on transient errors.
+    # Returns (coords, found_flag). Raises only if the service
+    # is unreachable on every attempt.
+
+    last_error = None
+
+    for _attempt in range(3):
+
+        try:
+
+            loc = geolocator.geocode(query)
+
+            if loc:
+                return [loc.latitude, loc.longitude]
+
+            return None
+
+        except (GeocoderServiceError, GeocoderTimedOut) as exc:
+
+            last_error = exc
+
+    raise last_error
+
+
 def search_location(q):
 
-    geolocator = Nominatim(
-        user_agent="ancpi_polygon_export_app"
-    )
+    # Both Nominatim and Photon are free public services with
+    # no API key. On shared hosts (e.g. Streamlit Cloud) the
+    # server IP often gets rate-limited, so we try Nominatim
+    # first and fall back to Photon before giving up. Errors
+    # are returned as a string instead of crashing the app.
 
-    loc = geolocator.geocode(
-        q + ", Romania"
-    )
+    query = q + ", Romania"
 
-    if loc:
-        return [loc.latitude, loc.longitude]
+    geocoders = [
+        Nominatim(
+            user_agent="ancpi_polygon_export_app (amaria.hendre@gmail.com)",
+            timeout=10,
+        ),
+        Photon(
+            user_agent="ancpi_polygon_export_app (amaria.hendre@gmail.com)",
+            timeout=10,
+        ),
+    ]
 
-    return None
+    service_down = True
+
+    for geolocator in geocoders:
+
+        try:
+
+            coords = _geocode_with(geolocator, query)
+
+            service_down = False
+
+            if coords:
+                return coords, None
+
+        except (GeocoderServiceError, GeocoderTimedOut):
+
+            # This provider is unavailable — try the next one.
+            continue
+
+    if service_down:
+
+        return None, (
+            "Geocoding services are temporarily unavailable "
+            "(rate-limited). Please try again in a moment."
+        )
+
+    return None, "Location not found."
 
 
 def parse_highlight_groups(text):
@@ -553,7 +613,7 @@ with st.sidebar:
         use_container_width=True
     ):
 
-        center = search_location(q)
+        center, error = search_location(q)
 
         if center:
 
@@ -565,9 +625,7 @@ with st.sidebar:
 
         else:
 
-            st.warning(
-                "Location not found."
-            )
+            st.warning(error)
 
     st.divider()
 
