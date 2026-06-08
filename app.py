@@ -1,13 +1,13 @@
 import json
 import html
 import re
-import time
 import requests
 import streamlit as st
 import folium
 
 from folium.plugins import Draw
 from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
 from collections import defaultdict
 
 # =========================================================
@@ -50,31 +50,18 @@ if "geojson" not in st.session_state:
 
 def search_location(q):
 
-    try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": q + ", Romania",
-            "format": "json",
-            "limit": 1,
-        }
-        headers = {
-            "User-Agent": "ancpi_polygon_export_app"
-        }
-        r = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=10,
-        )
-        data = r.json()
-        if data:
-            return [
-                float(data[0]["lat"]),
-                float(data[0]["lon"]),
-            ]
-        return None
-    except Exception:
-        return "unavailable"
+    geolocator = Nominatim(
+        user_agent="ancpi_polygon_export_app"
+    )
+
+    loc = geolocator.geocode(
+        q + ", Romania"
+    )
+
+    if loc:
+        return [loc.latitude, loc.longitude]
+
+    return None
 
 
 def parse_highlight_groups(text):
@@ -144,8 +131,7 @@ def geojson_polygon_to_esri_geometry(
     }
 
 
-@st.cache_data(show_spinner=False)
-def get_object_ids(esri_geom_json):
+def get_object_ids(esri_geom):
 
     params = {
 
@@ -157,7 +143,7 @@ def get_object_ids(esri_geom_json):
         "returnIdsOnly": "true",
 
         "geometry":
-            esri_geom_json,
+            json.dumps(esri_geom),
 
         "geometryType":
             "esriGeometryPolygon",
@@ -184,50 +170,11 @@ def get_object_ids(esri_geom_json):
     return data.get("objectIds", [])
 
 
-# Funcție PURĂ, cache-uită — descarcă un singur chunk,
-# fără widget-uri Streamlit înăuntru.
-@st.cache_data(show_spinner=False)
-def fetch_chunk(chunk_ids):
-
-    params = {
-
-        "f": "geojson",
-
-        "objectIds":
-            ",".join(map(str, chunk_ids)),
-
-        "outFields": "*",
-
-        "returnGeometry": "true",
-
-        "outSR": "4326",
-    }
-
-    # retry de 3 ori la erori 5xx de la serverul ANCPI
-    for attempt in range(3):
-        try:
-            r = requests.get(
-                LAYER_QUERY_URL,
-                params=params,
-                timeout=120,
-            )
-            r.raise_for_status()
-            break
-        except requests.HTTPError:
-            if attempt == 2:
-                raise
-            time.sleep(2 ** attempt)
-
-    return r.json().get("features", [])
-
-
-# Wrapper NON-cache-uit — aici trăiește progress bar-ul,
-# ca să se afișeze corect mereu.
 def fetch_features_by_ids(object_ids):
 
     features = []
 
-    chunk_size = 50
+    chunk_size = 250
 
     progress = st.sidebar.progress(0)
 
@@ -241,9 +188,35 @@ def fetch_features_by_ids(object_ids):
         chunk_size
     ):
 
-        chunk = tuple(object_ids[i:i + chunk_size])
+        chunk = object_ids[i:i + chunk_size]
 
-        features.extend(fetch_chunk(chunk))
+        params = {
+
+            "f": "geojson",
+
+            "objectIds":
+                ",".join(map(str, chunk)),
+
+            "outFields": "*",
+
+            "returnGeometry": "true",
+
+            "outSR": "4326",
+        }
+
+        r = requests.get(
+            LAYER_QUERY_URL,
+            params=params,
+            timeout=120
+        )
+
+        r.raise_for_status()
+
+        data = r.json()
+
+        features.extend(
+            data.get("features", [])
+        )
 
         progress.progress(
             min(len(features) / total, 1.0)
@@ -342,7 +315,8 @@ def geojson_to_kml(
 
     uat_folders = defaultdict(list)
 
-    # cf -> set of group names
+    # Build a mapping cf -> set of group names
+    # (a CF could theoretically belong to multiple groups)
     cf_to_groups = defaultdict(set)
 
     for group_name, cfs in highlight_groups.items():
@@ -362,6 +336,8 @@ def geojson_to_kml(
         groups_for_cf = cf_to_groups.get(cf)
 
         if groups_for_cf:
+            # Add the feature to every group it belongs to,
+            # under its own UAT sub-folder
             for group_name in groups_for_cf:
                 highlighted_folders[group_name][uat].append(feature)
         else:
@@ -555,14 +531,7 @@ with st.sidebar:
 
         center = search_location(q)
 
-        if center == "unavailable":
-
-            st.warning(
-                "Geocoding service unavailable. "
-                "Navigate manually on the map."
-            )
-
-        elif center:
+        if center:
 
             st.session_state.center = center
             st.session_state.zoom = 15
@@ -738,44 +707,33 @@ Draw(
 ).add_to(m)
 
 # DISPLAY DOWNLOADED FEATURES
-# Afișăm doar dacă sunt relativ puține parcele, altfel
-# browserul îngheață. Parcelele sunt oricum vizibile
-# prin layer-ul WMS "ANCPI Parcels".
-
-MAX_DISPLAY_FEATURES = 400
 
 if st.session_state.geojson:
 
-    n_feat = len(
-        st.session_state.geojson.get("features", [])
-    )
+    folium.GeoJson(
 
-    if n_feat <= MAX_DISPLAY_FEATURES:
+        st.session_state.geojson,
 
-        folium.GeoJson(
+        name="Downloaded Parcels",
 
-            st.session_state.geojson,
+        tooltip=folium.GeoJsonTooltip(
 
-            name="Downloaded Parcels",
+            fields=[
+                "NR_CARTE_FUNCIARA",
+                "IDENTIFIER",
+                "UAT",
+                "LOCALITATE",
+            ],
 
-            tooltip=folium.GeoJsonTooltip(
+            aliases=[
+                "CF",
+                "Identifier",
+                "UAT",
+                "Locality",
+            ],
+        ),
 
-                fields=[
-                    "NR_CARTE_FUNCIARA",
-                    "IDENTIFIER",
-                    "UAT",
-                    "LOCALITATE",
-                ],
-
-                aliases=[
-                    "CF",
-                    "Identifier",
-                    "UAT",
-                    "Locality",
-                ],
-            ),
-
-        ).add_to(m)
+    ).add_to(m)
 
 folium.LayerControl().add_to(m)
 
@@ -825,7 +783,7 @@ if export_clicked:
             )
 
             object_ids = get_object_ids(
-                json.dumps(esri_geom, sort_keys=True)
+                esri_geom
             )
 
             st.sidebar.info(
@@ -837,7 +795,7 @@ if export_clicked:
             if object_ids:
 
                 fc = fetch_features_by_ids(
-                    tuple(object_ids)
+                    object_ids
                 )
 
                 st.session_state.geojson = fc
