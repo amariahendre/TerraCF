@@ -534,7 +534,7 @@ with st.sidebar:
         use_container_width=True
     ):
 
-                center = search_location(q)
+        center = search_location(q)
 
         if center == "unavailable":
 
@@ -556,6 +556,7 @@ with st.sidebar:
             st.warning(
                 "Location not found."
             )
+
     st.divider()
 
     marked_cf_text = st.text_area(
