@@ -1,6 +1,7 @@
 import json
 import html
 import re
+import time
 import requests
 import streamlit as st
 import folium
@@ -143,7 +144,8 @@ def geojson_polygon_to_esri_geometry(
     }
 
 
-def get_object_ids(esri_geom):
+@st.cache_data(show_spinner=False)
+def get_object_ids(esri_geom_json):
 
     params = {
 
@@ -155,7 +157,7 @@ def get_object_ids(esri_geom):
         "returnIdsOnly": "true",
 
         "geometry":
-            json.dumps(esri_geom),
+            esri_geom_json,
 
         "geometryType":
             "esriGeometryPolygon",
@@ -182,11 +184,12 @@ def get_object_ids(esri_geom):
     return data.get("objectIds", [])
 
 
+@st.cache_data(show_spinner=False)
 def fetch_features_by_ids(object_ids):
 
     features = []
 
-    chunk_size = 250
+    chunk_size = 50
 
     progress = st.sidebar.progress(0)
 
@@ -216,13 +219,19 @@ def fetch_features_by_ids(object_ids):
             "outSR": "4326",
         }
 
-        r = requests.get(
-            LAYER_QUERY_URL,
-            params=params,
-            timeout=120
-        )
-
-        r.raise_for_status()
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    LAYER_QUERY_URL,
+                    params=params,
+                    timeout=120,
+                )
+                r.raise_for_status()
+                break
+            except requests.HTTPError:
+                if attempt == 2:
+                    raise
+                time.sleep(2 ** attempt)
 
         data = r.json()
 
@@ -799,7 +808,7 @@ if export_clicked:
             )
 
             object_ids = get_object_ids(
-                esri_geom
+                json.dumps(esri_geom, sort_keys=True)
             )
 
             st.sidebar.info(
@@ -811,7 +820,7 @@ if export_clicked:
             if object_ids:
 
                 fc = fetch_features_by_ids(
-                    object_ids
+                    tuple(object_ids)
                 )
 
                 st.session_state.geojson = fc
