@@ -50,13 +50,21 @@ if "geojson" not in st.session_state:
 
 def search_location(q):
 
+    from geopy.exc import GeocoderUnavailable, GeocoderTimedOut
+
     geolocator = Nominatim(
         user_agent="ancpi_polygon_export_app"
     )
 
-    loc = geolocator.geocode(
-        q + ", Romania"
-    )
+    try:
+        loc = geolocator.geocode(
+            q + ", Romania",
+            timeout=10,
+        )
+    except (GeocoderUnavailable, GeocoderTimedOut):
+        return "unavailable"
+    except Exception:
+        return None
 
     if loc:
         return [loc.latitude, loc.longitude]
@@ -315,8 +323,7 @@ def geojson_to_kml(
 
     uat_folders = defaultdict(list)
 
-    # Build a mapping cf -> set of group names
-    # (a CF could theoretically belong to multiple groups)
+    # cf -> set of group names
     cf_to_groups = defaultdict(set)
 
     for group_name, cfs in highlight_groups.items():
@@ -336,8 +343,6 @@ def geojson_to_kml(
         groups_for_cf = cf_to_groups.get(cf)
 
         if groups_for_cf:
-            # Add the feature to every group it belongs to,
-            # under its own UAT sub-folder
             for group_name in groups_for_cf:
                 highlighted_folders[group_name][uat].append(feature)
         else:
@@ -531,7 +536,14 @@ with st.sidebar:
 
         center = search_location(q)
 
-        if center:
+        if center == "unavailable":
+
+            st.warning(
+                "Geocoding service unavailable. "
+                "Navigate manually on the map."
+            )
+
+        elif center:
 
             st.session_state.center = center
             st.session_state.zoom = 15
