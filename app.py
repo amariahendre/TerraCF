@@ -7,7 +7,6 @@ import folium
 
 from folium.plugins import Draw
 from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
 from collections import defaultdict
 
 # =========================================================
@@ -50,26 +49,31 @@ if "geojson" not in st.session_state:
 
 def search_location(q):
 
-    from geopy.exc import GeocoderUnavailable, GeocoderTimedOut
-
-    geolocator = Nominatim(
-        user_agent="ancpi_polygon_export_app"
-    )
-
     try:
-        loc = geolocator.geocode(
-            q + ", Romania",
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "q": q + ", Romania",
+            "format": "json",
+            "limit": 1,
+        }
+        headers = {
+            "User-Agent": "ancpi_polygon_export_app"
+        }
+        r = requests.get(
+            url,
+            params=params,
+            headers=headers,
             timeout=10,
         )
-    except (GeocoderUnavailable, GeocoderTimedOut):
-        return "unavailable"
-    except Exception:
+        data = r.json()
+        if data:
+            return [
+                float(data[0]["lat"]),
+                float(data[0]["lon"]),
+            ]
         return None
-
-    if loc:
-        return [loc.latitude, loc.longitude]
-
-    return None
+    except Exception:
+        return "unavailable"
 
 
 def parse_highlight_groups(text):
